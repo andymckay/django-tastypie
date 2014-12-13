@@ -6,7 +6,7 @@ from django.core.exceptions import ObjectDoesNotExist, MultipleObjectsReturned
 from django.utils import datetime_safe, importlib
 from tastypie.bundle import Bundle
 from tastypie.exceptions import ApiFieldError, NotFound
-from tastypie.utils import dict_strip_unicode_keys, make_aware
+from tastypie.utils import dict_strip_unicode_keys
 
 
 class NOT_PROVIDED:
@@ -141,12 +141,14 @@ class ApiField(object):
         """
         if self.readonly:
             return None
+
         if not bundle.data.has_key(self.instance_name):
             if getattr(self, 'is_related', False) and not getattr(self, 'is_m2m', False):
                 # We've got an FK (or alike field) & a possible parent object.
                 # Check for it.
                 if bundle.related_obj and bundle.related_name in (self.attribute, self.instance_name):
                     return bundle.related_obj
+
             if self.blank:
                 return None
             elif self.attribute and getattr(bundle.obj, self.attribute, None):
@@ -320,7 +322,7 @@ class DateField(ApiField):
         if value and not hasattr(value, 'year'):
             try:
                 # Try to rip a date/datetime out of it.
-                value = make_aware(parse(value))
+                value = parse(value)
 
                 if hasattr(value, 'hour'):
                     value = value.date()
@@ -346,7 +348,7 @@ class DateTimeField(ApiField):
 
             if match:
                 data = match.groupdict()
-                return make_aware(datetime_safe.datetime(int(data['year']), int(data['month']), int(data['day']), int(data['hour']), int(data['minute']), int(data['second'])))
+                return datetime_safe.datetime(int(data['year']), int(data['month']), int(data['day']), int(data['hour']), int(data['minute']), int(data['second']))
             else:
                 raise ApiFieldError("Datetime provided to '%s' field doesn't appear to be a valid datetime string: '%s'" % (self.instance_name, value))
 
@@ -358,7 +360,7 @@ class DateTimeField(ApiField):
         if value and not hasattr(value, 'year'):
             try:
                 # Try to rip a date/datetime out of it.
-                value = make_aware(parse(value))
+                value = parse(value)
             except ValueError:
                 pass
 
@@ -543,7 +545,7 @@ class RelatedField(ApiField):
             return fk_resource.full_hydrate(fk_bundle)
 
         try:
-            return fk_resource.obj_update(fk_bundle, skip_errors=True, **data)
+            return fk_resource.obj_update(fk_bundle, **data)
         except NotFound:
             try:
                 # Attempt lookup by primary key
@@ -551,11 +553,10 @@ class RelatedField(ApiField):
 
                 if not lookup_kwargs:
                     raise NotFound()
-                return fk_resource.obj_update(fk_bundle, skip_errors=True, **lookup_kwargs)
+
+                return fk_resource.obj_update(fk_bundle, **lookup_kwargs)
             except NotFound:
-                fk_bundle = fk_resource.full_hydrate(fk_bundle)
-                fk_resource.is_valid(fk_bundle, request)
-                return fk_bundle
+                return fk_resource.full_hydrate(fk_bundle)
         except MultipleObjectsReturned:
             return fk_resource.full_hydrate(fk_bundle)
 
@@ -585,9 +586,6 @@ class RelatedField(ApiField):
         if isinstance(value, basestring):
             # We got a URI. Load the object and assign it.
             return self.resource_from_uri(self.fk_resource, value, **kwargs)
-        elif isinstance(value, Bundle):
-            # We got a valid bundle object, the RelatedField had full=True
-            return value
         elif hasattr(value, 'items'):
             # We've got a data dictionary.
             # Since this leads to creation, this is the only one of these
@@ -597,7 +595,7 @@ class RelatedField(ApiField):
             # We've got an object with a primary key.
             return self.resource_from_pk(self.fk_resource, value, **kwargs)
         else:
-            raise ApiFieldError("The '%s' field was given data that was not a URI, not a dictionary-alike and does not have a 'pk' attribute: %s." % (self.instance_name, value))
+            raise ApiFieldError("The '%s' field has was given data that was not a URI, not a dictionary-alike and does not have a 'pk' attribute: %s." % (self.instance_name, value))
 
 
 class ToOneField(RelatedField):
@@ -619,21 +617,16 @@ class ToOneField(RelatedField):
         self.fk_resource = None
 
     def dehydrate(self, bundle):
-        attrs = self.attribute.split('__')
-        foreign_obj = bundle.obj
+        try:
+            foreign_obj = getattr(bundle.obj, self.attribute)
+        except ObjectDoesNotExist:
+            foreign_obj = None
 
-        for attr in attrs:
-            previous_obj = foreign_obj
-            try:
-                foreign_obj = getattr(foreign_obj, attr, None)
-            except ObjectDoesNotExist:
-                foreign_obj = None
+        if not foreign_obj:
+            if not self.null:
+                raise ApiFieldError("The model '%r' has an empty attribute '%s' and doesn't allow a null value." % (bundle.obj, self.attribute))
 
-            if not foreign_obj:
-                if not self.null:
-                    raise ApiFieldError("The model '%r' has an empty attribute '%s' and doesn't allow a null value." % (previous_obj, attr))
-
-                return None
+            return None
 
         self.fk_resource = self.get_related_resource(foreign_obj)
         fk_bundle = Bundle(obj=foreign_obj, request=bundle.request)
@@ -692,29 +685,15 @@ class ToManyField(RelatedField):
             return []
 
         the_m2ms = None
-        previous_obj = bundle.obj
-        attr = self.attribute
 
         if isinstance(self.attribute, basestring):
-            attrs = self.attribute.split('__')
-            the_m2ms = bundle.obj
-
-            for attr in attrs:
-                previous_obj = the_m2ms
-                try:
-                    the_m2ms = getattr(the_m2ms, attr, None)
-                except ObjectDoesNotExist:
-                    the_m2ms = None
-
-                if not the_m2ms:
-                    break
-
+            the_m2ms = getattr(bundle.obj, self.attribute)
         elif callable(self.attribute):
             the_m2ms = self.attribute(bundle)
 
         if not the_m2ms:
             if not self.null:
-                raise ApiFieldError("The model '%r' has an empty attribute '%s' and doesn't allow a null value." % (previous_obj, attr))
+                raise ApiFieldError("The model '%r' has an empty attribute '%s' and doesn't allow a null value." % (bundle.obj, self.attribute))
 
             return []
 
